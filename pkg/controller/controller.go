@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-	"kolihub.io/kong-ingress/pkg/kong"
+	"github.com/koli/kong-ingress/pkg/kong"
 
 	"k8s.io/api/core/v1"
 	v1beta1 "k8s.io/api/extensions/v1beta1"
@@ -244,22 +244,22 @@ func (k *KongController) syncIngress(key string, numRequeues int) error {
 		}
 	}
 
-	if k.cfg.AutoClaim {
-		if err := k.claimDomains(ing); err != nil {
-			return fmt.Errorf("autoclaim=on, failed claiming domains [%s]", err)
-		}
-		time.Sleep(500 * time.Millisecond) // give time to sync the domains
-	}
-	isAllowed, notFoundHost, err := k.isClaimed(ing)
-	if err != nil {
-		return fmt.Errorf("failed retrieving domains from indexer [%s]", err)
-	}
-	if !isAllowed {
-		if numRequeues > 2 {
-			k.recorder.Eventf(ing, v1.EventTypeWarning, "DomainNotFound", "The domain '%s' was not claimed, check its state", notFoundHost)
-		}
-		return fmt.Errorf("failed claiming domain %s, check its state!", notFoundHost)
-	}
+	//if k.cfg.AutoClaim {
+	//	if err := k.claimDomains(ing); err != nil {
+	//		return fmt.Errorf("autoclaim=on, failed claiming domains [%s]", err)
+	//	}
+	//	time.Sleep(500 * time.Millisecond) // give time to sync the domains
+	//}
+	//isAllowed, notFoundHost, err := k.isClaimed(ing)
+	//if err != nil {
+	//	return fmt.Errorf("failed retrieving domains from indexer [%s]", err)
+	//}
+	//if !isAllowed {
+	//	if numRequeues > 2 {
+	//		k.recorder.Eventf(ing, v1.EventTypeWarning, "DomainNotFound", "The domain '%s' was not claimed, check its state", notFoundHost)
+	//	}
+	//	return fmt.Errorf("failed claiming domain %s, check its state!", notFoundHost)
+	//}
 	glog.V(4).Infof("%s - Allowed to sync ingress routes, found all domains.", key)
 	// TODO: add tls
 	// Rules could have repeated domains, it will be redundant but it will work.
@@ -335,10 +335,12 @@ func (k *KongController) syncIngress(key string, numRequeues int) error {
 
 			apiBody := &kong.API{
 				Name:         apiName,
-				Hosts:        []string{r.Host},
 				UpstreamURL:  upstreamURL,
 				StripUri:     stripUri,
 				PreserveHost: preserveHost,
+			}
+			if r.Host != "" {
+				apiBody.Hosts = []string{r.Host}
 			}
 			if p.Path != "" {
 				apiBody.URIs = []string{pathURI}

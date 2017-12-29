@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"kolihub.io/kong-ingress/pkg/kong"
+	"github.com/koli/kong-ingress/pkg/kong"
 
 	"github.com/golang/glog"
 	"github.com/juju/ratelimit"
