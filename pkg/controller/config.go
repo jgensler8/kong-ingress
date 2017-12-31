@@ -6,7 +6,6 @@ import "k8s.io/client-go/rest"
 type Config struct {
 	KongAdminHost  string
 	Host           string
-	TLSInsecure    bool
 	TLSConfig      rest.TLSClientConfig
 	ClusterDNS     string
 	PodNamespace   string

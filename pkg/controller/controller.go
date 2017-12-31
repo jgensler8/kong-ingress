@@ -10,6 +10,7 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/koli/kong-ingress/pkg/kong"
+	kongswagger "github.com/jgensler8/kong-swagger/generated"
 
 	"k8s.io/api/core/v1"
 	v1beta1 "k8s.io/api/extensions/v1beta1"
@@ -26,6 +27,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
+	"strings"
+	"gopkg.in/square/go-jose.v2/json"
 )
 
 // TODO: an user is limited on how many paths and hosts he could create, this limitation is based on a hard quota from a Plan
@@ -33,6 +36,7 @@ import (
 
 var (
 	keyFunc = cache.DeletionHandlingMetaNamespaceKeyFunc
+	pluginPrefix = "kolihub.io/plugin-"
 )
 
 // KongController watches the kubernetes api server and adds/removes apis on Kong
@@ -40,6 +44,7 @@ type KongController struct {
 	client    kubernetes.Interface
 	extClient restclient.Interface
 	kongcli   *kong.CoreClient
+	kongclient *kongswagger.APIClient
 
 	infIng cache.SharedIndexInformer
 	infSvc cache.SharedIndexInformer
@@ -58,6 +63,7 @@ func NewKongController(
 	client kubernetes.Interface,
 	extClient restclient.Interface,
 	kongcli *kong.CoreClient,
+	kongclient *kongswagger.APIClient,
 	cfg *Config,
 	resyncPeriod time.Duration,
 ) *KongController {
@@ -70,6 +76,7 @@ func NewKongController(
 		client:    client,
 		extClient: extClient,
 		kongcli:   kongcli,
+		kongclient: kongclient,
 		recorder:  eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "kong-controller"}),
 		cfg:       cfg,
 	}
@@ -224,6 +231,56 @@ func (k *KongController) syncServices(key string, numRequeues int) error {
 	return nil
 }
 
+func (k *KongController) ConfigurePluginsForAPI(uuid string, ing *v1beta1.Ingress) (error) {
+	var err error
+	for a, annotationValue := range ing.Annotations {
+		if strings.HasPrefix(a, pluginPrefix) {
+			pluginname := strings.TrimPrefix(a, pluginPrefix)
+			plugin := kongswagger.Plugin{
+				Name: pluginname,
+			}
+			var iplugin interface{}
+			if pluginname == "key-auth" {
+				config := kongswagger.PluginConfigKeyAuth{}
+				err = json.Unmarshal([]byte(annotationValue), &config)
+				iplugin = config
+			} else if pluginname == "cors" {
+				config := kongswagger.PluginConfigCors{}
+				err = json.Unmarshal([]byte(annotationValue), &config)
+				iplugin = config
+			} else if pluginname == "jwt" {
+				config := kongswagger.PluginConfigJwt{}
+				err = json.Unmarshal([]byte(annotationValue), &config)
+				iplugin = config
+			} else if pluginname == "rate-limiting" {
+				config := kongswagger.PluginConfigRateLimiting{}
+				err = json.Unmarshal([]byte(annotationValue), &config)
+				iplugin = config
+			} else {
+				err := fmt.Errorf("Invlaid plugin '%s' specificied for ing/%s/%s with annotation %s", pluginname, ing.Namespace, ing.Name, a)
+				glog.Error(err)
+				return err
+			}
+			if err != nil {
+				glog.Infof("Failed to unmarshal plugin config for ing/%s/%s with annotation %s", ing.Namespace, ing.Name, a)
+				return err
+			}
+			plugin.Config = &iplugin
+
+			params := map[string]interface{}{
+				"plugin": plugin,
+			}
+
+			_, _, err := k.kongclient.DefaultApi.CreatePlugin(uuid, params)
+			if err != nil {
+				glog.Infof("Failed to create plugin for ing/%s/%s with annotation %s", ing.Namespace, ing.Name, a)
+				return err
+			}
+		}
+	}
+	return err
+}
+
 func (k *KongController) syncIngress(key string, numRequeues int) error {
 	obj, exists, err := k.infIng.GetStore().GetByKey(key)
 	if err != nil {
@@ -356,6 +413,13 @@ func (k *KongController) syncIngress(key string, numRequeues int) error {
 				return fmt.Errorf("failed adding api: %s", resp)
 			}
 			glog.Infof("%s - added route for %s[%s]", key, r.Host, api.UID)
+
+			// configure the API
+			err = k.ConfigurePluginsForAPI(api.UID, ing)
+			if err != nil {
+				return err
+			}
+			glog.Infof("%s - finished creating plugins for %s[%s]", key, r.Host, api.UID)
 		}
 	}
 	return nil

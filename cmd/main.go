@@ -27,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubescheme "k8s.io/client-go/kubernetes/scheme"
+	kongswagger "github.com/jgensler8/kong-swagger/generated"
 )
 
 // TODO: test with wipeondelete (on/off)
@@ -67,7 +68,7 @@ func init() {
 	pflag.StringVar(&cfg.PodNamespace, "pod-namespace", defaultNamespace, "the namespace to store cluster primary domains. It will be ignored if is running inside a kubernetes pod")
 
 	pflag.BoolVar(&showVersion, "version", false, "print version information and quit")
-	pflag.BoolVar(&cfg.TLSInsecure, "tls-insecure", false, "don't verify API server's CA certificate.")
+	pflag.BoolVar(&cfg.TLSConfig.Insecure, "tls-insecure", false, "don't verify API server's CA certificate.")
 	pflag.Parse()
 	// Convinces goflags that we have called Parse() to avoid noisy logs.
 	// OSS Issue: kubernetes/kubernetes#17162.
@@ -140,10 +141,15 @@ func main() {
 		glog.Fatalf("failed creating domains TPR: %s", err)
 	}
 
+	kongconf := kongswagger.NewConfiguration()
+	kongconf.BasePath = cfg.KongAdminHost
+	kongclient := kongswagger.NewAPIClient(kongconf)
+
 	go controller.NewKongController(
 		kubeClient,
 		extClient,
 		kongcli,
+		kongclient,
 		&cfg,
 		time.Second*120,
 	).Run(1, wait.NeverStop)

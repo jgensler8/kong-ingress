@@ -30,6 +30,9 @@ docker-build:
 	docker build --rm -t ${IMAGE} rootfs
 	docker tag ${IMAGE} ${MUTABLE_IMAGE}
 
+docker-run:
+	docker run --rm -it --name kong-ingress -v ~/.minikube:/certs ${MUTABLE_IMAGE} --apiserver=https://192.168.99.101:8443 --cert-file=/certs/client.crt --key-file=/certs/client.key --ca-file=/certs/ca.crt --auto-claim --wipe-on-delete --kong-server=http://192.168.99.101:31016 --v=4 --logtostderr
+
 test: test-unit
 
 test-unit:
