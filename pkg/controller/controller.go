@@ -271,10 +271,25 @@ func (k *KongController) ConfigurePluginsForAPI(uuid string, ing *v1beta1.Ingres
 				"plugin": plugin,
 			}
 
-			_, _, err := k.kongclient.DefaultApi.CreatePlugin(uuid, params)
+			list, _, err := k.kongclient.DefaultApi.ListPlugins(uuid)
 			if err != nil {
-				glog.Infof("Failed to create plugin for ing/%s/%s with annotation %s", ing.Namespace, ing.Name, a)
+				glog.Infof("Failed to list plugins for API %s", uuid)
 				return err
+			}
+			found := false
+			for _, p := range list.Data {
+				if p.Name == plugin.Name {
+					glog.Infof("Plugin (%s) already configured for API (%s). Note that new configuration is NOT applied", plugin.Name, uuid)
+					found = true
+					break
+				}
+			}
+			if ! found {
+				_, _, err := k.kongclient.DefaultApi.CreatePlugin(uuid, params)
+				if err != nil {
+					glog.Infof("Failed to create plugin for ing/%s/%s with annotation %s", ing.Namespace, ing.Name, a)
+					return err
+				}
 			}
 		}
 	}
