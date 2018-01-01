@@ -2,48 +2,51 @@ package controller
 
 import (
 	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"net/http"
 	"net/url"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/golang/glog"
-	"github.com/koli/kong-ingress/pkg/kong"
+	auth0 "github.com/jgensler8/go-auth0/generated/client"
 	kongswagger "github.com/jgensler8/kong-swagger/generated"
-
+	"github.com/koli/kong-ingress/pkg/kong"
+	"gopkg.in/square/go-jose.v2/json"
 	"k8s.io/api/core/v1"
 	v1beta1 "k8s.io/api/extensions/v1beta1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
-	"strings"
-	"gopkg.in/square/go-jose.v2/json"
 )
 
 // TODO: an user is limited on how many paths and hosts he could create, this limitation is based on a hard quota from a Plan
 // Wait for https://github.com/Mashape/kong/issues/383
 
 var (
-	keyFunc = cache.DeletionHandlingMetaNamespaceKeyFunc
-	pluginPrefix = "kolihub.io/plugin-"
+	keyFunc                  = cache.DeletionHandlingMetaNamespaceKeyFunc
+	pluginPrefix             = "kolihub.io/plugin-"
+	jwtAuth0DomainAnnotation = "kolihub.io/x-jwt-auth0-domain"
 )
 
 // KongController watches the kubernetes api server and adds/removes apis on Kong
 type KongController struct {
-	client    kubernetes.Interface
-	extClient restclient.Interface
-	kongcli   *kong.CoreClient
+	client     kubernetes.Interface
+	extClient  restclient.Interface
+	kongcli    *kong.CoreClient
 	kongclient *kongswagger.APIClient
 
 	infIng cache.SharedIndexInformer
@@ -73,12 +76,12 @@ func NewKongController(
 		Interface: v1core.New(client.Core().RESTClient()).Events(""),
 	})
 	kc := &KongController{
-		client:    client,
-		extClient: extClient,
-		kongcli:   kongcli,
+		client:     client,
+		extClient:  extClient,
+		kongcli:    kongcli,
 		kongclient: kongclient,
-		recorder:  eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "kong-controller"}),
-		cfg:       cfg,
+		recorder:   eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "kong-controller"}),
+		cfg:        cfg,
 	}
 	kc.ingQueue = NewTaskQueue(kc.syncIngress, "kong_ingress_queue")
 	kc.domQueue = NewTaskQueue(kc.syncDomain, "kong_domain_queue")
@@ -231,7 +234,7 @@ func (k *KongController) syncServices(key string, numRequeues int) error {
 	return nil
 }
 
-func (k *KongController) ConfigurePluginsForAPI(uuid string, ing *v1beta1.Ingress) (error) {
+func (k *KongController) ConfigurePluginsForAPI(uuid string, ing *v1beta1.Ingress) error {
 	var err error
 	for a, annotationValue := range ing.Annotations {
 		if strings.HasPrefix(a, pluginPrefix) {
@@ -284,7 +287,7 @@ func (k *KongController) ConfigurePluginsForAPI(uuid string, ing *v1beta1.Ingres
 					break
 				}
 			}
-			if ! found {
+			if !found {
 				_, _, err := k.kongclient.DefaultApi.CreatePlugin(uuid, params)
 				if err != nil {
 					glog.Infof("Failed to create plugin for ing/%s/%s with annotation %s", ing.Namespace, ing.Name, a)
@@ -294,6 +297,88 @@ func (k *KongController) ConfigurePluginsForAPI(uuid string, ing *v1beta1.Ingres
 		}
 	}
 	return err
+}
+
+func (k *KongController) TryAutoConfigureAuth0(ing *v1beta1.Ingress) error {
+	host := ""
+	for k, v := range ing.Annotations {
+		if k == jwtAuth0DomainAnnotation {
+			host = v
+			break
+		}
+	}
+	if host == "" {
+		return nil
+	}
+
+	cfg := auth0.DefaultTransportConfig().WithHost(host)
+	client := auth0.NewHTTPClientWithConfig(nil, cfg)
+
+	certBuf := bytes.NewBufferString("")
+	_, err := client.Operations.GetPEM(nil, certBuf)
+	if err != nil {
+		glog.Errorf("Failed to get x509 certificate from Auth0")
+		return err
+	}
+	block, _ := pem.Decode(certBuf.Bytes())
+	var cert *x509.Certificate
+	cert, err = x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		glog.Errorf("Failed to parse x509 certificate returned by Auth0")
+		return err
+	}
+	asn1Bytes, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
+	if err != nil {
+		glog.Errorf("Failed to marshal public key from Auth0's certificate")
+		return err
+	}
+	var pemkey = &pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: asn1Bytes,
+	}
+	buf := bytes.NewBufferString("")
+	err = pem.Encode(buf, pemkey)
+	if err != nil {
+		glog.Errorf("Failed to encode public key from Auth0's certificate")
+		return err
+	}
+
+	_, res, err := k.kongclient.DefaultApi.GetConsumer(host)
+	if err != nil {
+		if res.StatusCode == http.StatusNotFound {
+			consumer := kongswagger.Consumer{
+				Username: host,
+			}
+			_, err := k.kongclient.DefaultApi.CreateConsumer(consumer)
+			if err != nil {
+				glog.Errorf("Failed to create default JWT-associated Consumer for host (%s)", host)
+				return err
+			}
+		} else {
+			glog.Errorf("Failed to get consumer (%s) in Auth0 auto-configuration", host)
+			return err
+		}
+	}
+
+	list, _, err := k.kongclient.DefaultApi.ListJWTCredentials(host)
+	if err != nil {
+		glog.Errorf("Failed to list JWT credentials for default consumer (%s)", host)
+		return err
+	}
+	if list.Total == 0 {
+		jwtcred := kongswagger.JwtCredential{
+			Algorithm:    "RS256",
+			RsaPublicKey: buf.String(),
+			Key:          host,
+		}
+		_, _, err = k.kongclient.DefaultApi.CreateJWTCredential(host, jwtcred)
+		if err != nil {
+			glog.Errorf("Failed to create JWT credential for default consumer (%s)", host)
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (k *KongController) syncIngress(key string, numRequeues int) error {
@@ -435,6 +520,12 @@ func (k *KongController) syncIngress(key string, numRequeues int) error {
 				return err
 			}
 			glog.Infof("%s - finished creating plugins for %s[%s]", key, r.Host, api.UID)
+
+			err = k.TryAutoConfigureAuth0(ing)
+			if err != nil {
+				glog.Errorf("Failed to configure Auth0 for %s[%s]", r.Host, api.UID)
+				return err
+			}
 		}
 	}
 	return nil
