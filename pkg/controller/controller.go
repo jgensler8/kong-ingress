@@ -31,6 +31,7 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"github.com/pkg/errors"
 )
 
 // TODO: an user is limited on how many paths and hosts he could create, this limitation is based on a hard quota from a Plan
@@ -299,6 +300,39 @@ func (k *KongController) ConfigurePluginsForAPI(uuid string, ing *v1beta1.Ingres
 	return err
 }
 
+func (k *KongController) TryConfigureCertificates(ing *v1beta1.Ingress) error {
+	for _, t := range ing.Spec.TLS {
+		for _, h := range t.Hosts {
+			secret, err := k.client.CoreV1().Secrets(ing.Namespace).Get(t.SecretName, metav1.GetOptions{})
+			if err != nil {
+				glog.Errorf("Failed to list secrets to match with Ingress TLS certificates")
+				return err
+			}
+			if secret.Type != v1.SecretTypeTLS {
+				errmessage := fmt.Sprintf("Secret Specified for Ingress is not a TLS Secret (found %s instead)", secret.Type)
+				glog.Error(errmessage)
+				return errors.New(errmessage)
+			}
+
+			cert := kongswagger.Certificate{
+				Cert: string(secret.Data["tls.crt"]),
+				Key: string(secret.Data["tls.key"]),
+				Snis: []string{ h },
+			}
+			options := map[string]interface{} {
+				"certificate": cert,
+			}
+			_, _, err = k.kongclient.DefaultApi.CreateCertificate(options)
+			if err != nil {
+				glog.Errorf("Failed to create kong tls certificate for host %s in ingress %s/%s", h, ing.Namespace, ing.Name)
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 func (k *KongController) TryAutoConfigureAuth0(ing *v1beta1.Ingress) error {
 	host := ""
 	for k, v := range ing.Annotations {
@@ -369,7 +403,8 @@ func (k *KongController) TryAutoConfigureAuth0(ing *v1beta1.Ingress) error {
 		jwtcred := kongswagger.JwtCredential{
 			Algorithm:    "RS256",
 			RsaPublicKey: buf.String(),
-			Key:          host,
+			// iss field ends with a '/'
+			Key:          "https://" + host + "/",
 		}
 		_, _, err = k.kongclient.DefaultApi.CreateJWTCredential(host, jwtcred)
 		if err != nil {
@@ -520,6 +555,12 @@ func (k *KongController) syncIngress(key string, numRequeues int) error {
 				return err
 			}
 			glog.Infof("%s - finished creating plugins for %s[%s]", key, r.Host, api.UID)
+
+			err = k.TryConfigureCertificates(ing)
+			if err != nil {
+				return err
+			}
+			glog.Infof("%s - finished creating certificates for %s[%s]", key, r.Host, api.UID)
 
 			err = k.TryAutoConfigureAuth0(ing)
 			if err != nil {
