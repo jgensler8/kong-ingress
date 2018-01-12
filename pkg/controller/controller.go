@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"github.com/pkg/errors"
+	"encoding/base64"
 )
 
 // TODO: an user is limited on how many paths and hosts he could create, this limitation is based on a hard quota from a Plan
@@ -314,13 +315,24 @@ func (k *KongController) TryConfigureCertificates(ing *v1beta1.Ingress) error {
 				return errors.New(errmessage)
 			}
 
-			cert := kongswagger.Certificate{
-				Cert: string(secret.Data["tls.crt"]),
-				Key: string(secret.Data["tls.key"]),
+			cert, err := base64.StdEncoding.DecodeString(string(secret.Data["tls.crt"]))
+			if err != nil {
+				glog.Errorf("Failed to decode certificate from %s/%s", secret.Namespace, secret.Name)
+				return err
+			}
+			key, err := base64.StdEncoding.DecodeString(string(secret.Data["tls.key"]))
+			if err != nil {
+				glog.Errorf("Failed to decode key from secret %s/%s", secret.Namespace, secret.Name)
+				return err
+			}
+
+			kongcert := kongswagger.Certificate{
+				Cert: string(cert),
+				Key: string(key),
 				Snis: []string{ h },
 			}
 			options := map[string]interface{} {
-				"certificate": cert,
+				"certificate": kongcert,
 			}
 			_, _, err = k.kongclient.DefaultApi.CreateCertificate(options)
 			if err != nil {
