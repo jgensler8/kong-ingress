@@ -1,5 +1,5 @@
 GIT_TAG ?= $(or ${TRAVIS_TAG},${TRAVIS_TAG},latest)
-MUTABLE_VERSION ?= skip-domain-check.12
+MUTABLE_VERSION ?= skip-domain-check.13
 VERSION ?= ${GIT_TAG}
 GITCOMMIT ?= $(shell git rev-parse HEAD)
 DATE ?= $(shell date -u "+%Y-%m-%dT%H:%M:%SZ")

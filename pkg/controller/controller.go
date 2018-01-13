@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"errors"
 
 	"github.com/golang/glog"
 	auth0 "github.com/jgensler8/go-auth0/generated/client"
@@ -31,8 +32,6 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-	"github.com/pkg/errors"
-	"encoding/base64"
 )
 
 // TODO: an user is limited on how many paths and hosts he could create, this limitation is based on a hard quota from a Plan
@@ -315,28 +314,49 @@ func (k *KongController) TryConfigureCertificates(ing *v1beta1.Ingress) error {
 				return errors.New(errmessage)
 			}
 
-			cert, err := base64.StdEncoding.DecodeString(string(secret.Data["tls.crt"]))
+			// Certs created by kube-cert-manager might be a chain. The following code will turn that
+			// chain (root and intermediate) into just the intermediate certificate.
+			block, _ := pem.Decode(secret.Data["tls.crt"])
+			var cert *x509.Certificate
+			cert, err = x509.ParseCertificate(block.Bytes)
 			if err != nil {
-				glog.Errorf("Failed to decode certificate from %s/%s", secret.Namespace, secret.Name)
+				glog.Errorf("Failed to parse x509 certificate located in secret %s/%s", secret.Namespace, secret.Name)
 				return err
 			}
-			key, err := base64.StdEncoding.DecodeString(string(secret.Data["tls.key"]))
+			var pemkey = &pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: cert.Raw,
+			}
+			buf := bytes.NewBufferString("")
+			err = pem.Encode(buf, pemkey)
 			if err != nil {
-				glog.Errorf("Failed to decode key from secret %s/%s", secret.Namespace, secret.Name)
+				glog.Errorf("Failed to encode certificate (%s/%s)", secret.Namespace, secret.Name)
 				return err
 			}
 
 			kongcert := kongswagger.Certificate{
-				Cert: string(cert),
-				Key: string(key),
-				Snis: []string{ h },
+				Cert: buf.String(),
+				Key: string(secret.Data["tls.key"]),
 			}
 			options := map[string]interface{} {
 				"certificate": kongcert,
 			}
-			_, _, err = k.kongclient.DefaultApi.CreateCertificate(options)
+			c, _, err := k.kongclient.DefaultApi.CreateCertificate(options)
 			if err != nil {
 				glog.Errorf("Failed to create kong tls certificate for host %s in ingress %s/%s", h, ing.Namespace, ing.Name)
+				return err
+			}
+
+			kongsni := kongswagger.Sni{
+				Name: h,
+				SslCertificateId: c.Id,
+			}
+			sniOptions := map[string]interface{} {
+				"sni": kongsni,
+			}
+			_, _, err = k.kongclient.DefaultApi.CreateSNI(sniOptions)
+			if err != nil {
+				glog.Errorf("Failed to create kong SNI for host %s in ingress %s/%s", h, ing.Namespace, ing.Name)
 				return err
 			}
 		}
